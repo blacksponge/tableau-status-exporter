@@ -2,8 +2,8 @@ import json
 import os
 import requests
 import logging
-from prometheus_client import generate_latest, REGISTRY
-from server_parser_status_metrics import TableauServerStatusParser
+from prometheus_client import generate_latest, REGISTRY, Enum
+from .server_parser_status_metrics import TableauServerStatusParser
 from prometheus_client.twisted import MetricsResource
 from twisted.web.server import Site
 from twisted.web.resource import Resource
@@ -68,33 +68,45 @@ class TableauMetricsCollector(object):
         logger.info('Initializing metrics collector')
         self.token_manager = token_manager
         self.verify_ssl = verify_ssl
+        self.collector_status = Enum('tableau_collector_status', 'Show the connection status to tableau server', states=['ok', 'connectionerror', 'httperror', 'valueerror', 'accessdenied'])
 
     def collect(self):
         '''collect metrics'''
 
         check = '{}/admin/systeminfo.xml'.format(self.token_manager.host)
-
+        xml_response = None
         # 3 retries
         for i in range(0,3):
-            x = requests.get(check, headers={
-                "Cookie": 'workgroup_session_id={}'.format(self.token_manager.token)
-                }, verify=self.verify_ssl)
-            xml_response = ET.fromstring(x.text)
-
-            if 'error' == xml_response.tag:
-                if 'code' == xml_response[0].tag and '1' == xml_response[0].text:
-                    logger.info('Access Denied, requesting token refresh')
-                    self.token_manager.refresh()
-                else:
-                    raise ValueError('Status check failed. XML response: {}'.format(x.text))
+            try:
+                x = requests.get(check, headers={
+                    "Cookie": 'workgroup_session_id={}'.format(self.token_manager.token)
+                    }, verify=self.verify_ssl)
+                x.raise_for_status()
+            except requests.exceptions.ConnectionError:
+                self.collector_status.state('connectionerror')
+            except requests.exceptions.HTTPError:
+                self.collector_status.state('httperror')
             else:
-                # response looks good
-                break
+                xml_response = ET.fromstring(x.text)
+
+                if 'error' == xml_response.tag:
+                    if 'code' == xml_response[0].tag and '1' == xml_response[0].text:
+                        logger.info('Access Denied, requesting token refresh')
+                        self.collector_status.state('accessdenied')
+                        self.token_manager.refresh()
+                    else:
+                        self.collector_status.state('valueerror')
+                        logger.error('Status check failed. XML response: {}'.format(x.text))
+                else:
+                    # response looks good
+                    self.collector_status.state('ok')
+                    #yield exporter_status._samples()
+                    break
         else:
             # refreshed token 3 times, no luck
-            raise ValueError('Status check failed. XML response: {}'.format(x.text))
-
-        yield TableauServerStatusParser.tableau_server_parse_status_metrics(xml_response[0])
+            logger.error('Status check failed. XML response: {}'.format(""))
+        if xml_response is not None:
+            yield TableauServerStatusParser.tableau_server_parse_status_metrics(xml_response[0])
 
     def describe(self):
         return []

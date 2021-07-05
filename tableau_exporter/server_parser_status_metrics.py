@@ -1,5 +1,6 @@
 from prometheus_client.core import GaugeMetricFamily
 
+import xml.etree.ElementTree as ET
 
 class TableauServerStatusParser(object):
     DEFAULT_LABEL_KEYS = ['machine', 'process', 'status']
